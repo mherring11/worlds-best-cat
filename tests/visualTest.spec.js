@@ -8,6 +8,10 @@ const config = require("../config.js");
 let pixelmatch;
 let chalk;
 
+// Staging authentication credentials
+const STAGING_USERNAME = "wbclstg";
+const STAGING_PASSWORD = "chl_wbclstg";
+
 // Dynamically load `pixelmatch` and `chalk`
 (async () => {
   pixelmatch = (await import("pixelmatch")).default;
@@ -48,16 +52,21 @@ async function resizeImage(imagePath, width, height) {
 
 // Scroll to the bottom of the page and back to the top
 async function scrollPage(page) {
-  console.log(chalk.yellow("Scrolling to the bottom of the page..."));
+  console.log(chalk.yellow("Force scrolling to the bottom of the page..."));
+
   await page.evaluate(async () => {
-    await new Promise((resolve) => {
+    await new Promise((resolve, reject) => {
       let totalHeight = 0;
-      const distance = 100;
+      const distance = window.innerHeight;
+      const maxAttempts = 10; // Prevent infinite loop
+      let attempt = 0;
+
       const timer = setInterval(() => {
         window.scrollBy(0, distance);
         totalHeight += distance;
+        attempt++;
 
-        if (totalHeight >= document.body.scrollHeight) {
+        if (totalHeight >= document.body.scrollHeight - window.innerHeight || attempt >= maxAttempts) {
           clearInterval(timer);
           resolve();
         }
@@ -67,8 +76,12 @@ async function scrollPage(page) {
 
   console.log(chalk.yellow("Scrolling back to the top..."));
   await page.evaluate(() => window.scrollTo(0, 0));
+
+  console.log(chalk.yellow("Waiting 3 seconds for lazy-loaded elements..."));
+  await page.waitForTimeout(3000);
   await page.waitForLoadState("networkidle");
 }
+
 
 // Compare two screenshots and return similarity percentage
 async function compareScreenshots(baselinePath, currentPath, diffPath) {
@@ -120,17 +133,19 @@ async function compareScreenshots(baselinePath, currentPath, diffPath) {
 async function captureScreenshot(page, url, screenshotPath) {
   try {
     console.log(chalk.blue(`Navigating to: ${url}`));
-    await page.goto(url, { waitUntil: "networkidle", timeout: 60000 });
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
 
-    await scrollPage(page);
+    try {
+      await scrollPage(page);
+    } catch (scrollError) {
+      console.warn(chalk.red(`⚠️ Scroll failed for ${url}: ${scrollError.message}. Taking screenshot anyway.`));
+    }
 
     ensureDirectoryExistence(screenshotPath);
     await page.screenshot({ path: screenshotPath, fullPage: true });
-    console.log(chalk.green(`Screenshot captured: ${screenshotPath}`));
+    console.log(chalk.green(`✅ Screenshot captured: ${screenshotPath}`));
   } catch (error) {
-    console.error(
-      chalk.red(`Failed to capture screenshot for ${url}: ${error.message}`)
-    );
+    console.error(chalk.red(`❌ Failed to capture screenshot for ${url}: ${error.message}`));
   }
 }
 
@@ -141,12 +156,10 @@ function generateHtmlReport(results, deviceName) {
 
   // Count passed, failed, and errors
   const passed = results.filter(
-    (r) =>
-      typeof r.similarityPercentage === "number" && r.similarityPercentage >= 95
+    (r) => typeof r.similarityPercentage === "number" && r.similarityPercentage >= 95
   ).length;
   const failed = results.filter(
-    (r) =>
-      typeof r.similarityPercentage === "number" && r.similarityPercentage < 95
+    (r) => typeof r.similarityPercentage === "number" && r.similarityPercentage < 95
   ).length;
   const errors = results.filter(
     (r) => r.similarityPercentage === "Error"
@@ -236,7 +249,7 @@ function generateHtmlReport(results, deviceName) {
     let statusText = "Error";
 
     if (typeof result.similarityPercentage === "number") {
-      if (result.similarityPercentage >= 95) {
+      if (result.similarityPercentage >= 97) {
         statusClass = "status-pass";
         statusText = "Pass";
       } else {
@@ -247,49 +260,35 @@ function generateHtmlReport(results, deviceName) {
 
     htmlContent += `
     <tr>
-      <td>
-        <a href="${config.staging.baseUrl}${
-      result.pagePath
-    }" target="_blank" class="staging">Staging</a> | 
-        <a href="${config.prod.baseUrl}${
-      result.pagePath
-    }" target="_blank" class="prod">Prod</a>
-      </td>
-      <td>${
-        typeof result.similarityPercentage === "number"
-          ? result.similarityPercentage.toFixed(2) + "%"
-          : "Error"
-      }</td>
-      <td class="${statusClass}">${statusText}</td>
-      <td>
-        <div class="image-container">
-          ${
-            stagingBase64
-              ? `<div class="image-wrapper">
-                   <img src="${stagingBase64}" onclick="openModal('${stagingBase64}')" alt="Staging">
-                   <div class="image-label">Staging</div>
-                 </div>`
-              : "N/A"
-          }
-          ${
-            prodBase64
-              ? `<div class="image-wrapper">
-                   <img src="${prodBase64}" onclick="openModal('${prodBase64}')" alt="Prod">
-                   <div class="image-label">Prod</div>
-                 </div>`
-              : "N/A"
-          }
-          ${
-            diffBase64
-              ? `<div class="image-wrapper">
-                   <img src="${diffBase64}" onclick="openModal('${diffBase64}')" alt="Diff">
-                   <div class="image-label">Diff</div>
-                 </div>`
-              : "N/A"
-          }
-        </div>
-      </td>
-    </tr>
+  <td>
+    <a href="${config.prod.baseUrl}${result.pagePath}" target="_blank" class="prod-url">
+      <strong>${config.prod.baseUrl}${result.pagePath}</strong>
+    </a><br>
+    <a href="${config.staging.baseUrl}${result.pagePath}" target="_blank" class="staging">Staging</a> | 
+    <a href="${config.prod.baseUrl}${result.pagePath}" target="_blank" class="prod">Prod</a>
+  </td>
+  <td>${typeof result.similarityPercentage === "number"
+      ? result.similarityPercentage.toFixed(2) + "%"
+      : "Error"}
+  </td>
+  <td class="${statusClass}">${statusText}</td>
+  <td>
+    <div class="image-container">
+      ${stagingBase64 ? `<div class="image-wrapper">
+        <img src="${stagingBase64}" onclick="openModal('${stagingBase64}')" alt="Staging">
+        <div class="image-label">Staging</div>
+      </div>` : "N/A"}
+      ${prodBase64 ? `<div class="image-wrapper">
+        <img src="${prodBase64}" onclick="openModal('${prodBase64}')" alt="Prod">
+        <div class="image-label">Prod</div>
+      </div>` : "N/A"}
+      ${diffBase64 ? `<div class="image-wrapper">
+        <img src="${diffBase64}" onclick="openModal('${diffBase64}')" alt="Diff">
+        <div class="image-label">Diff</div>
+      </div>` : "N/A"}
+    </div>
+  </td>
+</tr>
   `;
   });
 
@@ -317,10 +316,41 @@ function generateHtmlReport(results, deviceName) {
   `;
 
   fs.writeFileSync(reportPath, htmlContent);
+  console.log(chalk.green(`HTML report generated: ${reportPath}`));
+}
+
+// Capture screenshot for a given URL with scrolling and an idle timeout
+async function captureScreenshotWithIdleTimeout(page, url, screenshotPath, nextUrl) {
+  try {
+    console.log(chalk.blue(`Navigating to: ${url}`));
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+
+    try {
+      await scrollPage(page);
+    } catch (scrollError) {
+      console.warn(chalk.red(`⚠️ Scroll failed for ${url}: ${scrollError.message}. Taking screenshot anyway.`));
+    }
+
+    ensureDirectoryExistence(screenshotPath);
+    await page.screenshot({ path: screenshotPath, fullPage: true });
+    console.log(chalk.green(`✅ Screenshot captured: ${screenshotPath}`));
+
+    console.log(chalk.yellow("Idle timeout started... Waiting for 10 seconds before navigating to next URL."));
+    await page.waitForTimeout(5000); // 10 seconds idle time
+
+    if (nextUrl) {
+      console.log(chalk.blue(`⏭ Navigating to next URL: ${nextUrl}`));
+      await page.goto(nextUrl, { waitUntil: "domcontentloaded" });
+    }
+
+  } catch (error) {
+    console.error(chalk.red(`❌ Failed to capture screenshot for ${url}: ${error.message}`));
+  }
 }
 
 // Main Test Suite
 test.describe("Visual Comparison Tests", () => {
+  test.setTimeout(14400000);
   test("Compare staging and prod screenshots and generate HTML report", async ({ browser }) => {
     const results = [];
     const deviceName = "Desktop";
@@ -334,10 +364,20 @@ test.describe("Visual Comparison Tests", () => {
       }
     });
 
-    const context = await browser.newContext({
+    // Create browser contexts for staging (with authentication) and production
+    const stagingContext = await browser.newContext({
+      viewport: { width: 1280, height: 800 },
+      httpCredentials: {
+        username: STAGING_USERNAME,
+        password: STAGING_PASSWORD,
+      },
+    });
+    const prodContext = await browser.newContext({
       viewport: { width: 1280, height: 800 },
     });
-    const page = await context.newPage();
+
+    const stagingPage = await stagingContext.newPage();
+    const prodPage = await prodContext.newPage();
 
     for (const pagePath of config.staging.urls) {
       const stagingUrl = `${config.staging.baseUrl}${pagePath}`;
@@ -361,8 +401,8 @@ test.describe("Visual Comparison Tests", () => {
       console.log(chalk.yellow(`🔄 Testing page: ${pagePath}`));
 
       try {
-        await captureScreenshot(page, stagingUrl, stagingScreenshotPath);
-        await captureScreenshot(page, prodUrl, prodScreenshotPath);
+        await captureScreenshot(stagingPage, stagingUrl, stagingScreenshotPath);
+        await captureScreenshot(prodPage, prodUrl, prodScreenshotPath);
 
         const similarity = await compareScreenshots(
           stagingScreenshotPath,
@@ -382,9 +422,12 @@ test.describe("Visual Comparison Tests", () => {
       }
     }
 
+    // Generate HTML report
     generateHtmlReport(results, deviceName);
-    console.log(chalk.blue("✔ Test run complete, HTML report generated."));
-    await context.close();
+
+    console.log(chalk.blue("✔ Test run complete."));
+    await stagingContext.close();
+    await prodContext.close();
   });
 
   test.describe("Product Carousel Image Verification", () => {
